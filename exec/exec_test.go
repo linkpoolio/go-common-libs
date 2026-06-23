@@ -1,6 +1,8 @@
 package exec
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -85,10 +87,34 @@ func TestExecuteWithStdin(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
-
 			assert.Equal(t, testCase.expected, output)
+
 		})
 	}
+}
+
+// TestExecuteTimeoutKillsChild proves that a command whose timeout fires is
+// actually killed, rather than being orphaned to run to completion after the
+// Go caller has already returned. The marker file is written only if the
+// command runs to completion; with the kill-on-timeout fix it must never be
+// created. (Before the fix the orphaned shell would wake up after its sleep
+// and write the marker, failing this assertion.)
+func TestExecuteTimeoutKillsChild(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "completed")
+
+	// `sleep 1` then write the marker. The 100ms timeout must fire first and
+	// SIGKILL the shell before it ever reaches the echo.
+	executor := NewExecutor()
+	_, err := executor.Execute(nil, "sh", []string{"-c", "sleep 1; echo done > " + markerPath}, 100*time.Millisecond)
+
+	assert.Error(t, err)
+	assert.True(t, strings.HasPrefix(err.Error(), "timeout executing"))
+
+	// Give an orphaned shell (had the kill not happened) enough time to finish
+	// its sleep and write the marker, then assert it never did.
+	time.Sleep(1500 * time.Millisecond)
+	_, statErr := os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(statErr), "timeout-killed command wrote its completion marker; child was not killed")
 }
 
 func TestExecuteWithStdinPipe(t *testing.T) {
